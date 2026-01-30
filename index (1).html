@@ -1,0 +1,683 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>DLE Economic Model v5</title>
+  <script src="https://unpkg.com/react@18/umd/react.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js" crossorigin></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+  <link href="https://cdn.jsdelivr.net/npm/tailwindcss@2.2.19/dist/tailwind.min.css" rel="stylesheet">
+  <style>
+    body { font-family: system-ui, -apple-system, sans-serif; }
+    input[type="number"]::-webkit-inner-spin-button { opacity: 1; }
+  </style>
+</head>
+<body class="bg-gray-100">
+  <div id="root"></div>
+  <script type="text/babel">
+    const { useState, useMemo, useCallback } = React;
+
+    const SimpleBarChart = ({ data, horizontal = false, formatValue = (v) => v.toFixed(1) }) => {
+      const maxValue = Math.max(...data.map(d => d.value));
+      const colors = ['#22c55e', '#16a34a', '#15803d', '#166534', '#14532d', '#4ade80', '#86efac', '#bbf7d0'];
+      if (horizontal) {
+        return (
+          <div className="space-y-2">
+            {data.map((item, i) => (
+              <div key={i} className="flex items-center gap-2">
+                <div className="w-20 text-xs text-gray-600 text-right truncate">{item.name}</div>
+                <div className="flex-1 bg-gray-200 rounded h-6 relative">
+                  <div className="h-full rounded" style={{ width: `${maxValue > 0 ? (item.value / maxValue * 100) : 0}%`, backgroundColor: colors[i % colors.length] }} />
+                  <span className="absolute right-2 top-1 text-xs font-mono">${formatValue(item.value)}</span>
+                </div>
+              </div>
+            ))}
+          </div>
+        );
+      }
+      return null;
+    };
+
+    const SimplePieChart = ({ data, formatValue = (v) => `$${v.toFixed(1)}MM` }) => {
+      const total = data.reduce((sum, d) => sum + d.value, 0);
+      const colors = ['#22c55e', '#16a34a', '#15803d', '#166534', '#14532d', '#4ade80'];
+      let currentAngle = 0;
+      const paths = data.map((item, i) => {
+        const angle = (item.value / total) * 360;
+        const startAngle = currentAngle;
+        currentAngle += angle;
+        const startRad = (startAngle - 90) * Math.PI / 180;
+        const endRad = (currentAngle - 90) * Math.PI / 180;
+        const x1 = 100 + 80 * Math.cos(startRad);
+        const y1 = 100 + 80 * Math.sin(startRad);
+        const x2 = 100 + 80 * Math.cos(endRad);
+        const y2 = 100 + 80 * Math.sin(endRad);
+        return { path: `M 100 100 L ${x1} ${y1} A 80 80 0 ${angle > 180 ? 1 : 0} 1 ${x2} ${y2} Z`, color: colors[i % colors.length], name: item.name, value: item.value, pct: (item.value / total * 100).toFixed(1) };
+      });
+      return (
+        <div className="flex items-center gap-4">
+          <svg viewBox="0 0 200 200" className="w-48 h-48">
+            {paths.map((p, i) => <path key={i} d={p.path} fill={p.color} stroke="white" strokeWidth="2"><title>{p.name}: {formatValue(p.value)} ({p.pct}%)</title></path>)}
+          </svg>
+          <div className="space-y-1">
+            {paths.map((p, i) => (
+              <div key={i} className="flex items-center gap-2 text-xs">
+                <div className="w-3 h-3 rounded" style={{backgroundColor: p.color}}></div>
+                <span>{p.name}: <span className="font-mono">{formatValue(p.value)}</span></span>
+              </div>
+            ))}
+          </div>
+        </div>
+      );
+    };
+
+    const Histogram = ({ data }) => {
+      const maxCount = Math.max(...data.map(d => d.count));
+      return (
+        <div>
+          <div className="flex items-end h-48 border-b border-gray-300 gap-px">
+            {data.map((bin, i) => (
+              <div key={i} className="flex-1 rounded-t" style={{ height: `${maxCount > 0 ? (bin.count / maxCount * 100) : 0}%`, backgroundColor: bin.isP50 ? '#15803d' : '#22c55e', minHeight: bin.count > 0 ? '2px' : '0' }} title={`${bin.label}: ${bin.count}`} />
+            ))}
+          </div>
+          <div className="flex justify-between mt-1 text-xs text-gray-500">
+            <span>{data[0]?.label}</span>
+            <span>{data[data.length-1]?.label}</span>
+          </div>
+        </div>
+      );
+    };
+
+    const DLEModel = () => {
+      const [devType, setDevType] = useState('Greenfield');
+      const [liConcentration, setLiConcentration] = useState(200);
+      const [reservoirDepth, setReservoirDepth] = useState(9000);
+      const [targetProduction, setTargetProduction] = useState(20000);
+      const [recoveryRate, setRecoveryRate] = useState(90);
+      const [capacityFactor, setCapacityFactor] = useState(90);
+      const [prodWellFlow, setProdWellFlow] = useState(10000);
+      const [injWellFlow, setInjWellFlow] = useState(15000);
+      const [drillingCost, setDrillingCost] = useState(450);
+      const [completionCost, setCompletionCost] = useState(1.5);
+      const [tieinCost, setTieinCost] = useState(0.5);
+      const [cpfBaseCost, setCpfBaseCost] = useState(450);
+      const [brownfieldSkidCost, setBrownfieldSkidCost] = useState(25);
+      const [scalingExp, setScalingExp] = useState(0.7);
+      const [contingency, setContingency] = useState(15);
+      const [epcm, setEpcm] = useState(12);
+      const [bfContingency, setBfContingency] = useState(10);
+      const [bfEpcm, setBfEpcm] = useState(8);
+      const [dleLicenseGF, setDleLicenseGF] = useState(25);
+      const [dleLicenseBF, setDleLicenseBF] = useState(15);
+      const [reagentCost, setReagentCost] = useState(800);
+      const [powerCost, setPowerCost] = useState(60);
+      const [powerConsumption, setPowerConsumption] = useState(12);
+      const [pumpEfficiency, setPumpEfficiency] = useState(55);
+      const [sorbentCost, setSorbentCost] = useState(150);
+      const [waterTreatment, setWaterTreatment] = useState(0.25);
+      const [maintenancePct, setMaintenancePct] = useState(2.5);
+      const [insurancePct, setInsurancePct] = useState(0.8);
+      const [swdFee, setSwdFee] = useState(0.10);
+      const [liPrice, setLiPrice] = useState(25000);
+      const [royaltyRate, setRoyaltyRate] = useState(2.5);
+      const [brineFeeAcreage, setBrineFeeAcreage] = useState(20000);
+      const [brineFeeRate, setBrineFeeRate] = useState(0);
+      const [severanceTax, setSeveranceTax] = useState(2.0);
+      const [constructionLength, setConstructionLength] = useState(36);
+      const [operationalLife, setOperationalLife] = useState(25);
+      const [debtPct, setDebtPct] = useState(60);
+      const [costOfDebt, setCostOfDebt] = useState(6.5);
+      const [costOfEquity, setCostOfEquity] = useState(12.0);
+      const [useHurdleRate, setUseHurdleRate] = useState(false);
+      const [hurdleRate, setHurdleRate] = useState(10);
+      const [federalTax, setFederalTax] = useState(21);
+      const [stateTax, setStateTax] = useState(5);
+      const [itcEnabled, setItcEnabled] = useState(false);
+      const [itcRate, setItcRate] = useState(30);
+      const [itcEligiblePct, setItcEligiblePct] = useState(50);
+      const [energyCommunityBonus, setEnergyCommunityBonus] = useState(false);
+      const [ptcEnabled, setPtcEnabled] = useState(false);
+      const [ptcRate, setPtcRate] = useState(10);
+      const [processingCreditEnabled, setProcessingCreditEnabled] = useState(false);
+      const [processingCreditRate, setProcessingCreditRate] = useState(3000);
+      const [grantAmount, setGrantAmount] = useState(0);
+      const [doeLoanGuarantee, setDoeLoanGuarantee] = useState(false);
+      const [doeLoanRate, setDoeLoanRate] = useState(3.5);
+      const [percentageDepletion, setPercentageDepletion] = useState(true);
+      const [depletionRate, setDepletionRate] = useState(22);
+      const [rampUpPeriod, setRampUpPeriod] = useState(24);
+      const [mcIterations, setMcIterations] = useState(1000);
+      const [mcResults, setMcResults] = useState(null);
+      const [mcRunning, setMcRunning] = useState(false);
+      const [mcOutputMetric, setMcOutputMetric] = useState('lcol');
+      const [mcParams, setMcParams] = useState({
+        liConcentration: { enabled: true, dist: 'triangular', spread: 25 },
+        recoveryRate: { enabled: true, dist: 'triangular', spread: 5 },
+        capacityFactor: { enabled: true, dist: 'triangular', spread: 8 },
+        cpfBaseCost: { enabled: true, dist: 'triangular', spread: 25 },
+        reagentCost: { enabled: true, dist: 'triangular', spread: 20 },
+        liPrice: { enabled: true, dist: 'triangular', spread: 30 },
+      });
+      const [activeTab, setActiveTab] = useState('inputs');
+
+      const calcs = useMemo(() => {
+        const isBrownfield = devType === 'Brownfield';
+        const prod = targetProduction;
+        const recovery = recoveryRate / 100;
+        const capFactor = capacityFactor / 100;
+        const liPerBbl = liConcentration * 0.159 / 1e6;
+        const lcePerBbl = liPerBbl * 5.32;
+        const bblPerTLce = lcePerBbl > 0 && recovery > 0 ? 1 / (lcePerBbl * recovery) : 0;
+        const dailyBrineVol = prod > 0 && capFactor > 0 ? (prod * bblPerTLce) / (365 * capFactor) : 0;
+        const numProdWells = dailyBrineVol > 0 ? Math.ceil(dailyBrineVol / prodWellFlow) : 0;
+        const numInjWells = dailyBrineVol > 0 ? Math.ceil(dailyBrineVol / injWellFlow) : 0;
+        const totalWells = numProdWells + numInjWells;
+        const wellCostEach = (drillingCost * reservoirDepth / 1e6) + completionCost + tieinCost;
+        const wellCapex = isBrownfield ? 0 : totalWells * wellCostEach;
+        const pipelineCapex = isBrownfield ? 0 : totalWells * 0.3;
+        const cpfCapex = isBrownfield ? brownfieldSkidCost * Math.pow(prod / 1000, 0.85) : cpfBaseCost * Math.pow(prod / 20000, scalingExp);
+        const dleLicense = isBrownfield ? dleLicenseBF : dleLicenseGF;
+        const directCapex = wellCapex + pipelineCapex + cpfCapex + dleLicense;
+        const contPct = isBrownfield ? bfContingency : contingency;
+        const epcmPct = isBrownfield ? bfEpcm : epcm;
+        const contingencyAmt = directCapex * (contPct / 100);
+        const epcmAmt = directCapex * (epcmPct / 100);
+        const grossCapex = directCapex + contingencyAmt + epcmAmt;
+        const itcBonusRate = energyCommunityBonus ? 10 : 0;
+        const itcTotalRate = itcEnabled ? (itcRate + itcBonusRate) : 0;
+        const itcEligibleCapex = grossCapex * (itcEligiblePct / 100);
+        const itcValue = itcEligibleCapex * (itcTotalRate / 100);
+        const totalCapex = grossCapex - grantAmount;
+        const reagentOpex = isBrownfield ? reagentCost * 0.4 : reagentCost;
+        const powerOpex = powerCost * powerConsumption;
+        const brineDensity = 1100;
+        const depthMeters = reservoirDepth * 0.3048;
+        const joulesPerM3 = brineDensity * 9.81 * depthMeters / (pumpEfficiency / 100);
+        const kwhPerM3 = joulesPerM3 / 3.6e6;
+        const pumpKwhPerBbl = isBrownfield ? 0 : kwhPerM3 * 0.159;
+        const annualBrineVol = dailyBrineVol * 365 * capFactor;
+        const pumpingPowerCost = isBrownfield ? 0 : (pumpKwhPerBbl * annualBrineVol / 1000 * powerCost / 1e6);
+        const laborCost = isBrownfield ? 0.5 * (prod / 1000) : 15 * Math.pow(prod / 20000, 0.5);
+        const gaCost = isBrownfield ? 0.2 * (prod / 1000) : 8 * Math.pow(prod / 20000, 0.3);
+        const maintenanceCost = (maintenancePct / 100) * totalCapex;
+        const insuranceCost = (insurancePct / 100) * totalCapex;
+        const swdCost = isBrownfield ? swdFee * dailyBrineVol * 365 * capFactor / 1e6 : 0;
+        const variableOpex = (reagentOpex + powerOpex + sorbentCost + waterTreatment * bblPerTLce) * prod / 1e6;
+        const fixedOpex = laborCost + gaCost + maintenanceCost + insuranceCost + swdCost + pumpingPowerCost;
+        const totalOpex = variableOpex + fixedOpex;
+        const ptcBenefit = ptcEnabled ? (totalOpex * ptcRate / 100) : 0;
+        const processingCredit = processingCreditEnabled ? (prod * processingCreditRate / 1e6) : 0;
+        const total45XBenefit = ptcBenefit + processingCredit;
+        const effectiveOpex = totalOpex - ptcBenefit;
+        const opexPerTonne = prod > 0 ? effectiveOpex * 1e6 / prod : 0;
+        const annualRevenue = prod * liPrice / 1e6;
+        const annualBrineFee = brineFeeRate > 0 ? (brineFeeAcreage * brineFeeRate / 1e6) : 0;
+        const royaltyCost = brineFeeRate > 0 ? 0 : annualRevenue * (royaltyRate / 100);
+        const severanceCost = annualRevenue * (severanceTax / 100);
+        const ebitda = annualRevenue - royaltyCost - annualBrineFee - severanceCost - effectiveOpex + processingCredit;
+        const combinedTaxRate = (federalTax + stateTax * (1 - federalTax / 100)) / 100;
+        const effectiveCostOfDebt = doeLoanGuarantee ? doeLoanRate : costOfDebt;
+        const calculatedWacc = (debtPct/100 * effectiveCostOfDebt/100 * (1 - combinedTaxRate) + (1 - debtPct/100) * costOfEquity/100);
+        const wacc = useHurdleRate ? hurdleRate / 100 : calculatedWacc;
+        const constructionYears = constructionLength / 12;
+        const constructionDiscountFactor = Math.pow(1 + wacc, constructionYears);
+        const rampUpYears = rampUpPeriod / 12;
+        const normalizedAnnualDepr = totalCapex / Math.max(7, operationalLife);
+        const grossDepletion = percentageDepletion ? annualRevenue * (depletionRate / 100) : 0;
+        const taxableBeforeDepl = Math.max(0, ebitda - normalizedAnnualDepr);
+        const depletionAllowance = Math.min(grossDepletion, taxableBeforeDepl * 0.5);
+        let pvCashFlows = 0;
+        for (let year = 1; year <= operationalLife; year++) {
+          const rampFactor = year <= rampUpYears ? (year / rampUpYears) * 0.5 + 0.5 : 1.0;
+          const yearEbitda = ebitda * rampFactor;
+          const yearCashFlow = yearEbitda * (1 - combinedTaxRate) + (depletionAllowance * combinedTaxRate);
+          pvCashFlows += yearCashFlow / (Math.pow(1 + wacc, year) * constructionDiscountFactor);
+        }
+        let pvDeprShield = 0;
+        for (let year = 1; year <= Math.min(7, operationalLife); year++) {
+          pvDeprShield += (normalizedAnnualDepr * combinedTaxRate) / (Math.pow(1 + wacc, year) * constructionDiscountFactor);
+        }
+        const pvItc = itcValue / constructionDiscountFactor;
+        const npv = pvCashFlows + pvDeprShield + pvItc - totalCapex;
+        
+        const calcNpvAtPrice = (testPrice) => {
+          const testRevenue = prod * testPrice / 1e6;
+          const testRoyalty = brineFeeRate > 0 ? 0 : testRevenue * (royaltyRate / 100);
+          const testSeverance = testRevenue * (severanceTax / 100);
+          const testEbitda = testRevenue - testRoyalty - annualBrineFee - testSeverance - effectiveOpex + processingCredit;
+          const testGrossDepletion = percentageDepletion ? testRevenue * (depletionRate / 100) : 0;
+          const testDepletion = Math.min(testGrossDepletion, Math.max(0, testEbitda - normalizedAnnualDepr) * 0.5);
+          let testPv = 0;
+          for (let year = 1; year <= operationalLife; year++) {
+            const rf = year <= rampUpYears ? (year / rampUpYears) * 0.5 + 0.5 : 1.0;
+            testPv += (testEbitda * rf * (1 - combinedTaxRate) + testDepletion * combinedTaxRate) / (Math.pow(1 + wacc, year) * constructionDiscountFactor);
+          }
+          return testPv + pvDeprShield + pvItc - totalCapex;
+        };
+        
+        let lcolLow = 0, lcolHigh = 100000, lcol = 0;
+        for (let i = 0; i < 50; i++) {
+          lcol = (lcolLow + lcolHigh) / 2;
+          if (calcNpvAtPrice(lcol) > 0) lcolHigh = lcol; else lcolLow = lcol;
+        }
+        
+        return { wacc: wacc * 100, dailyBrineVol, numProdWells, numInjWells, totalWells, wellCapex, pipelineCapex, cpfCapex, dleLicense, contingencyAmt, epcmAmt, grossCapex, totalCapex, itcValue, ptcBenefit, processingCredit, total45XBenefit, variableOpex, fixedOpex, totalOpex, effectiveOpex, opexPerTonne, annualRevenue, ebitda, combinedTaxRate: combinedTaxRate * 100, lcol, margin: liPrice - lcol, npv, pumpKwhPerBbl, pumpingPowerCost, reagentOpex, powerOpex, sorbentOpex: sorbentCost, waterOpex: waterTreatment * bblPerTLce, laborCost, gaCost, maintenanceCost, insuranceCost, swdCost };
+      }, [devType, liConcentration, reservoirDepth, targetProduction, recoveryRate, capacityFactor, prodWellFlow, injWellFlow, drillingCost, completionCost, tieinCost, cpfBaseCost, brownfieldSkidCost, scalingExp, contingency, epcm, bfContingency, bfEpcm, dleLicenseGF, dleLicenseBF, reagentCost, powerCost, powerConsumption, sorbentCost, waterTreatment, maintenancePct, insurancePct, swdFee, liPrice, royaltyRate, brineFeeAcreage, brineFeeRate, severanceTax, constructionLength, operationalLife, debtPct, costOfDebt, costOfEquity, federalTax, stateTax, rampUpPeriod, itcEnabled, itcRate, itcEligiblePct, energyCommunityBonus, ptcEnabled, ptcRate, processingCreditEnabled, processingCreditRate, grantAmount, doeLoanGuarantee, doeLoanRate, percentageDepletion, depletionRate, useHurdleRate, hurdleRate, pumpEfficiency]);
+
+      const calculateProjectMetrics = useCallback((params) => {
+        const p = { devType, liConcentration, reservoirDepth, targetProduction, recoveryRate, capacityFactor, prodWellFlow, injWellFlow, drillingCost, completionCost, tieinCost, cpfBaseCost, brownfieldSkidCost, scalingExp, contingency, epcm, bfContingency, bfEpcm, dleLicenseGF, dleLicenseBF, reagentCost, powerCost, powerConsumption, sorbentCost, waterTreatment, maintenancePct, insurancePct, swdFee, pumpEfficiency, liPrice, royaltyRate, brineFeeAcreage, brineFeeRate, severanceTax, operationalLife, constructionLength, federalTax, stateTax, debtPct, costOfDebt, costOfEquity, useHurdleRate, hurdleRate, itcEnabled, itcRate, itcEligiblePct, energyCommunityBonus, ptcEnabled, ptcRate, processingCreditEnabled, processingCreditRate, grantAmount, doeLoanGuarantee, doeLoanRate, percentageDepletion, depletionRate, ...params };
+        const isBrownfield = p.devType === 'Brownfield';
+        const prod = p.targetProduction;
+        const recovery = p.recoveryRate / 100;
+        const capFactor = p.capacityFactor / 100;
+        const liPerBbl = p.liConcentration * 0.159 / 1e6;
+        const lcePerBbl = liPerBbl * 5.32;
+        const bblPerTLce = lcePerBbl > 0 && recovery > 0 ? 1 / (lcePerBbl * recovery) : 0;
+        const dailyBrineVol = prod > 0 && capFactor > 0 ? (prod * bblPerTLce) / (365 * capFactor) : 0;
+        const numProdWells = dailyBrineVol > 0 ? Math.ceil(dailyBrineVol / p.prodWellFlow) : 0;
+        const numInjWells = dailyBrineVol > 0 ? Math.ceil(dailyBrineVol / p.injWellFlow) : 0;
+        const totalWells = numProdWells + numInjWells;
+        const wellCostEach = (p.drillingCost * p.reservoirDepth / 1e6) + p.completionCost + p.tieinCost;
+        const wellCapex = isBrownfield ? 0 : totalWells * wellCostEach;
+        const cpfCapex = isBrownfield ? p.brownfieldSkidCost * Math.pow(prod / 1000, 0.85) : p.cpfBaseCost * Math.pow(prod / 20000, p.scalingExp);
+        const directCapex = wellCapex + (isBrownfield ? 0 : totalWells * 0.3) + cpfCapex + (isBrownfield ? p.dleLicenseBF : p.dleLicenseGF);
+        const grossCapex = directCapex * (1 + (isBrownfield ? p.bfContingency : p.contingency)/100 + (isBrownfield ? p.bfEpcm : p.epcm)/100);
+        const itcValue = p.itcEnabled ? grossCapex * (p.itcEligiblePct / 100) * ((p.itcRate + (p.energyCommunityBonus ? 10 : 0)) / 100) : 0;
+        const totalCapex = grossCapex - p.grantAmount;
+        const reagentOpex = isBrownfield ? p.reagentCost * 0.4 : p.reagentCost;
+        const powerOpex = p.powerCost * p.powerConsumption;
+        const depthMeters = p.reservoirDepth * 0.3048;
+        const pumpKwhPerBbl = isBrownfield ? 0 : (1100 * 9.81 * depthMeters / (p.pumpEfficiency / 100)) / 3.6e6 * 0.159;
+        const annualBrineVol = dailyBrineVol * 365 * capFactor;
+        const pumpingPowerCost = isBrownfield ? 0 : (pumpKwhPerBbl * annualBrineVol / 1000 * p.powerCost / 1e6);
+        const laborCost = isBrownfield ? 0.5 * (prod / 1000) : 15 * Math.pow(prod / 20000, 0.5);
+        const gaCost = isBrownfield ? 0.2 * (prod / 1000) : 8 * Math.pow(prod / 20000, 0.3);
+        const variableOpex = (reagentOpex + powerOpex + p.sorbentCost + p.waterTreatment * bblPerTLce) * prod / 1e6;
+        const fixedOpex = laborCost + gaCost + (p.maintenancePct / 100) * totalCapex + (p.insurancePct / 100) * totalCapex + (isBrownfield ? p.swdFee * dailyBrineVol * 365 * capFactor / 1e6 : 0) + pumpingPowerCost;
+        const totalOpex = variableOpex + fixedOpex;
+        const ptcBenefit = p.ptcEnabled ? (totalOpex * p.ptcRate / 100) : 0;
+        const processingCredit = p.processingCreditEnabled ? (prod * p.processingCreditRate / 1e6) : 0;
+        const effectiveOpex = totalOpex - ptcBenefit;
+        const annualBrineFee = p.brineFeeAcreage * p.brineFeeRate / 1e6;
+        const annualRevenue = prod * p.liPrice / 1e6;
+        const royaltyCost = p.brineFeeRate > 0 ? 0 : annualRevenue * (p.royaltyRate / 100);
+        const severanceCost = annualRevenue * (p.severanceTax / 100);
+        const ebitda = annualRevenue - royaltyCost - annualBrineFee - severanceCost - effectiveOpex + processingCredit;
+        const combinedTaxRate = (p.federalTax + p.stateTax * (1 - p.federalTax / 100)) / 100;
+        const effectiveCostOfDebt = p.doeLoanGuarantee ? p.doeLoanRate : p.costOfDebt;
+        const wacc = p.useHurdleRate ? p.hurdleRate / 100 : (p.debtPct/100 * effectiveCostOfDebt/100 * (1 - combinedTaxRate) + (1 - p.debtPct/100) * p.costOfEquity/100);
+        const opLife = params.operationalLife || p.operationalLife;
+        const rampUp = (params.rampUpPeriod || rampUpPeriod) / 12;
+        const constructionYears = p.constructionLength / 12;
+        const constructionDiscountFactor = Math.pow(1 + wacc, constructionYears);
+        const normalizedAnnualDepr = totalCapex / Math.max(7, opLife);
+        const grossDepletion = p.percentageDepletion ? annualRevenue * (p.depletionRate / 100) : 0;
+        const depletionAllowance = Math.min(grossDepletion, Math.max(0, ebitda - normalizedAnnualDepr) * 0.5);
+        let pvCashFlows = 0;
+        for (let year = 1; year <= opLife; year++) {
+          const rf = year <= rampUp ? (year / rampUp) * 0.5 + 0.5 : 1.0;
+          pvCashFlows += (ebitda * rf * (1 - combinedTaxRate) + depletionAllowance * combinedTaxRate) / (Math.pow(1 + wacc, year) * constructionDiscountFactor);
+        }
+        let pvDeprShield = 0;
+        for (let year = 1; year <= Math.min(7, opLife); year++) {
+          pvDeprShield += (normalizedAnnualDepr * combinedTaxRate) / (Math.pow(1 + wacc, year) * constructionDiscountFactor);
+        }
+        const pvItc = itcValue / constructionDiscountFactor;
+        const npv = pvCashFlows + pvDeprShield + pvItc - totalCapex;
+        
+        const calcNpvAtPrice = (testPrice) => {
+          const testRevenue = prod * testPrice / 1e6;
+          const testRoyalty = p.brineFeeRate > 0 ? 0 : testRevenue * (p.royaltyRate / 100);
+          const testEbitda = testRevenue - testRoyalty - annualBrineFee - testRevenue * (p.severanceTax / 100) - effectiveOpex + processingCredit;
+          const testDepletion = Math.min(p.percentageDepletion ? testRevenue * (p.depletionRate / 100) : 0, Math.max(0, testEbitda - normalizedAnnualDepr) * 0.5);
+          let testPv = 0;
+          for (let year = 1; year <= opLife; year++) {
+            const rf = year <= rampUp ? (year / rampUp) * 0.5 + 0.5 : 1.0;
+            testPv += (testEbitda * rf * (1 - combinedTaxRate) + testDepletion * combinedTaxRate) / (Math.pow(1 + wacc, year) * constructionDiscountFactor);
+          }
+          return testPv + pvDeprShield + pvItc - totalCapex;
+        };
+        let lcolLow = 0, lcolHigh = 100000, lcol = 0;
+        for (let i = 0; i < 50; i++) { lcol = (lcolLow + lcolHigh) / 2; if (calcNpvAtPrice(lcol) > 0) lcolHigh = lcol; else lcolLow = lcol; }
+        return { lcol, npv, totalCapex, totalOpex, ebitda };
+      }, [devType, liConcentration, reservoirDepth, targetProduction, recoveryRate, capacityFactor, prodWellFlow, injWellFlow, drillingCost, completionCost, tieinCost, cpfBaseCost, brownfieldSkidCost, scalingExp, contingency, epcm, bfContingency, bfEpcm, dleLicenseGF, dleLicenseBF, reagentCost, powerCost, powerConsumption, sorbentCost, waterTreatment, maintenancePct, insurancePct, swdFee, pumpEfficiency, liPrice, royaltyRate, brineFeeAcreage, brineFeeRate, severanceTax, operationalLife, constructionLength, federalTax, stateTax, debtPct, costOfDebt, costOfEquity, useHurdleRate, hurdleRate, rampUpPeriod, itcEnabled, itcRate, itcEligiblePct, energyCommunityBonus, ptcEnabled, ptcRate, processingCreditEnabled, processingCreditRate, grantAmount, doeLoanGuarantee, doeLoanRate, percentageDepletion, depletionRate]);
+
+      const runMonteCarlo = useCallback(() => {
+        setMcRunning(true);
+        setTimeout(() => {
+          const results = [];
+          const enabledParams = Object.entries(mcParams).filter(([_, c]) => c.enabled);
+          const baseValues = { liConcentration, recoveryRate, capacityFactor, cpfBaseCost, reagentCost, liPrice };
+          for (let i = 0; i < mcIterations; i++) {
+            const params = {};
+            enabledParams.forEach(([key, config]) => {
+              const base = baseValues[key];
+              const min = base * (1 - config.spread / 100);
+              const max = base * (1 + config.spread / 100);
+              const u = Math.random();
+              params[key] = config.dist === 'uniform' ? min + Math.random() * (max - min) : u < 0.5 ? min + Math.sqrt(u * (max - min) * (base - min)) : max - Math.sqrt((1 - u) * (max - min) * (max - base));
+            });
+            results.push(calculateProjectMetrics(params));
+          }
+          results.sort((a, b) => mcOutputMetric === 'npv' ? a.npv - b.npv : a.lcol - b.lcol);
+          const values = results.map(r => mcOutputMetric === 'npv' ? r.npv : r.lcol);
+          const mean = values.reduce((a, b) => a + b, 0) / values.length;
+          const stdDev = Math.sqrt(values.reduce((a, b) => a + Math.pow(b - mean, 2), 0) / values.length);
+          const p10 = values[Math.floor(values.length * 0.1)];
+          const p50 = values[Math.floor(values.length * 0.5)];
+          const p90 = values[Math.floor(values.length * 0.9)];
+          const min = Math.min(...values), max = Math.max(...values), binSize = (max - min) / 30;
+          const bins = Array(30).fill(0);
+          values.forEach(v => { bins[Math.min(Math.floor((v - min) / binSize), 29)]++; });
+          const histogramData = bins.map((count, i) => ({ label: (min + (i + 0.5) * binSize).toFixed(0), count, isP50: Math.abs((min + (i + 0.5) * binSize) - p50) < binSize }));
+          setMcResults({ results, mean, stdDev, p10, p50, p90, metric: mcOutputMetric, histogramData });
+          setMcRunning(false);
+        }, 100);
+      }, [mcParams, mcIterations, mcOutputMetric, calculateProjectMetrics, liConcentration, recoveryRate, capacityFactor, cpfBaseCost, reagentCost, liPrice]);
+
+      const capexData = useMemo(() => [
+        { name: 'Wells', value: calcs.wellCapex },
+        { name: 'Pipeline', value: calcs.pipelineCapex },
+        { name: 'CPF', value: calcs.cpfCapex },
+        { name: 'License', value: calcs.dleLicense },
+        { name: 'Contingency', value: calcs.contingencyAmt },
+        { name: 'EPCM', value: calcs.epcmAmt },
+      ].filter(d => d.value > 0), [calcs]);
+
+      const opexData = useMemo(() => [
+        { name: 'Reagent', value: calcs.reagentOpex * targetProduction / 1e6 },
+        { name: 'Power', value: calcs.powerOpex * targetProduction / 1e6 },
+        { name: 'Sorbent', value: calcs.sorbentOpex * targetProduction / 1e6 },
+        { name: 'Water', value: (calcs.waterOpex || 0) * targetProduction / 1e6 },
+        { name: 'Labor', value: calcs.laborCost },
+        { name: 'G&A', value: calcs.gaCost },
+        { name: 'Maint', value: calcs.maintenanceCost },
+        { name: 'Ins', value: calcs.insuranceCost },
+        ...(devType === 'Greenfield' && calcs.pumpingPowerCost > 0 ? [{ name: 'Pump', value: calcs.pumpingPowerCost }] : []),
+        ...(devType === 'Brownfield' ? [{ name: 'SWD', value: calcs.swdCost }] : []),
+      ].filter(d => d.value > 0), [calcs, targetProduction, devType]);
+
+      const formatCurrency = (v) => v >= 1000 ? `$${(v / 1000).toFixed(1)}B` : v >= 1 ? `$${v.toFixed(1)}MM` : `$${(v * 1000).toFixed(0)}K`;
+      const InputField = ({ label, value, onChange, unit, step = 1 }) => (
+        <div className="flex items-center justify-between py-1">
+          <label className="text-gray-700 text-xs">{label}</label>
+          <div className="flex items-center">
+            <input type="number" value={value} onChange={(e) => onChange(parseFloat(e.target.value) || 0)} step={step} className="w-20 px-2 py-1 text-right text-xs border border-gray-300 rounded" />
+            {unit && <span className="ml-1 text-xs text-gray-500 w-14">{unit}</span>}
+          </div>
+        </div>
+      );
+      const OutputRow = ({ label, value, unit = '', highlight = false }) => (
+        <div className={`flex items-center justify-between py-1 ${highlight ? 'bg-green-50 px-2 -mx-2 rounded font-semibold' : ''}`}>
+          <span className="text-xs">{label}</span>
+          <span className={`text-xs font-mono ${highlight ? 'text-green-700' : 'text-gray-700'}`}>{value}{unit && ` ${unit}`}</span>
+        </div>
+      );
+      const Section = ({ title, children }) => (
+        <div className="mb-4">
+          <h3 className="text-xs font-semibold text-gray-600 uppercase tracking-wider mb-2 border-b border-gray-200 pb-1">{title}</h3>
+          {children}
+        </div>
+      );
+
+      return (
+        <div className="min-h-screen bg-gray-50 p-4">
+          <div className="max-w-7xl mx-auto">
+            <div className="bg-gradient-to-r from-green-700 to-green-600 rounded-t-lg p-4 text-white">
+              <div className="flex justify-between items-center">
+                <div>
+                  <h1 className="text-2xl font-bold">DLE Economic Model</h1>
+                  <p className="text-green-100 text-sm">Direct Lithium Extraction Project Economics</p>
+                </div>
+                <div className="text-right">
+                  <div className="text-3xl font-bold">${calcs.lcol.toLocaleString(undefined, {maximumFractionDigits: 0})}/t</div>
+                  <div className="text-green-100 text-sm">Breakeven LCOL</div>
+                </div>
+              </div>
+            </div>
+            <div className="bg-white border-b border-gray-200 flex">
+              {['inputs', 'simulation', 'charts'].map(tab => (
+                <button key={tab} onClick={() => setActiveTab(tab)} className={`px-6 py-3 text-sm font-medium capitalize ${activeTab === tab ? 'text-green-700 border-b-2 border-green-700' : 'text-gray-500 hover:text-gray-700'}`}>{tab}</button>
+              ))}
+            </div>
+
+            {activeTab === 'inputs' && (
+              <div className="bg-white rounded-b-lg shadow p-4">
+                <div className="flex items-center gap-4 mb-4 pb-4 border-b">
+                  <span className="text-sm font-medium text-gray-700">Development Type:</span>
+                  <div className="flex rounded-lg overflow-hidden border border-gray-300">
+                    {['Greenfield', 'Brownfield'].map(type => (
+                      <button key={type} onClick={() => setDevType(type)} className={`px-4 py-2 text-sm ${devType === type ? 'bg-green-600 text-white' : 'bg-white text-gray-700'}`}>{type}</button>
+                    ))}
+                  </div>
+                </div>
+                <div className="grid grid-cols-4 gap-6">
+                  <div>
+                    <Section title="Reservoir">
+                      <InputField label="Li Concentration" value={liConcentration} onChange={setLiConcentration} unit="mg/L" />
+                      <InputField label="Reservoir Depth" value={reservoirDepth} onChange={setReservoirDepth} unit="ft" step={500} />
+                    </Section>
+                    <Section title="Production">
+                      <InputField label="Target Production" value={targetProduction} onChange={setTargetProduction} unit="t/yr" step={1000} />
+                      <InputField label="Recovery Rate" value={recoveryRate} onChange={setRecoveryRate} unit="%" />
+                      <InputField label="Capacity Factor" value={capacityFactor} onChange={setCapacityFactor} unit="%" />
+                    </Section>
+                    <Section title="Wells">
+                      <InputField label="Prod Well Flow" value={prodWellFlow} onChange={setProdWellFlow} unit="bbl/d" step={1000} />
+                      <InputField label="Inj Well Flow" value={injWellFlow} onChange={setInjWellFlow} unit="bbl/d" step={1000} />
+                    </Section>
+                  </div>
+                  <div>
+                    <Section title="CAPEX">
+                      {devType === 'Greenfield' ? (<>
+                        <InputField label="Drilling Cost" value={drillingCost} onChange={setDrillingCost} unit="$/ft" step={50} />
+                        <InputField label="Completion" value={completionCost} onChange={setCompletionCost} unit="$MM" step={0.1} />
+                        <InputField label="CPF Base Cost" value={cpfBaseCost} onChange={setCpfBaseCost} unit="$MM" step={25} />
+                        <InputField label="DLE License" value={dleLicenseGF} onChange={setDleLicenseGF} unit="$MM" />
+                        <InputField label="Contingency" value={contingency} onChange={setContingency} unit="%" />
+                        <InputField label="EPCM" value={epcm} onChange={setEpcm} unit="%" />
+                      </>) : (<>
+                        <InputField label="Skid Cost" value={brownfieldSkidCost} onChange={setBrownfieldSkidCost} unit="$MM" step={5} />
+                        <InputField label="DLE License" value={dleLicenseBF} onChange={setDleLicenseBF} unit="$MM" />
+                        <InputField label="Contingency" value={bfContingency} onChange={setBfContingency} unit="%" />
+                        <InputField label="EPCM" value={bfEpcm} onChange={setBfEpcm} unit="%" />
+                      </>)}
+                    </Section>
+                    <Section title="OPEX">
+                      <InputField label="Reagent Cost" value={reagentCost} onChange={setReagentCost} unit="$/t" step={100} />
+                      <InputField label="Power Cost" value={powerCost} onChange={setPowerCost} unit="$/MWh" />
+                      <InputField label="DLE Power" value={powerConsumption} onChange={setPowerConsumption} unit="MWh/t" />
+                      {devType === 'Greenfield' && <InputField label="Pump Eff." value={pumpEfficiency} onChange={setPumpEfficiency} unit="%" />}
+                      <InputField label="Sorbent" value={sorbentCost} onChange={setSorbentCost} unit="$/t" />
+                      <InputField label="Water Treat" value={waterTreatment} onChange={setWaterTreatment} unit="$/bbl" step={0.05} />
+                      <InputField label="Maintenance" value={maintenancePct} onChange={setMaintenancePct} unit="%" step={0.5} />
+                      {devType === 'Brownfield' && <InputField label="SWD Fee" value={swdFee} onChange={setSwdFee} unit="$/bbl" step={0.05} />}
+                    </Section>
+                    <Section title="Revenue">
+                      <InputField label="Li₂CO₃ Price" value={liPrice} onChange={setLiPrice} unit="$/t" step={1000} />
+                      <InputField label="Royalty Rate" value={royaltyRate} onChange={setRoyaltyRate} unit="%" step={0.5} />
+                      <InputField label="Severance Tax" value={severanceTax} onChange={setSeveranceTax} unit="%" step={0.5} />
+                    </Section>
+                  </div>
+                  <div>
+                    <Section title="Finance">
+                      <InputField label="Debt %" value={debtPct} onChange={setDebtPct} unit="%" />
+                      <InputField label="Cost of Debt" value={costOfDebt} onChange={setCostOfDebt} unit="%" step={0.25} />
+                      <InputField label="Cost of Equity" value={costOfEquity} onChange={setCostOfEquity} unit="%" step={0.5} />
+                      <div className="flex items-center justify-between py-1">
+                        <label className="text-gray-700 text-xs">Use Hurdle Rate</label>
+                        <input type="checkbox" checked={useHurdleRate} onChange={(e) => setUseHurdleRate(e.target.checked)} className="rounded" />
+                      </div>
+                      {useHurdleRate && <InputField label="Hurdle Rate" value={hurdleRate} onChange={setHurdleRate} unit="%" step={0.5} />}
+                      <OutputRow label="WACC" value={`${calcs.wacc.toFixed(2)}%`} highlight />
+                    </Section>
+                    <Section title="Schedule">
+                      <InputField label="Construction" value={constructionLength} onChange={setConstructionLength} unit="months" step={6} />
+                      <InputField label="Op Life" value={operationalLife} onChange={setOperationalLife} unit="years" />
+                      <InputField label="Ramp-Up" value={rampUpPeriod} onChange={setRampUpPeriod} unit="months" step={6} />
+                    </Section>
+                    <Section title="Taxes">
+                      <InputField label="Federal Tax" value={federalTax} onChange={setFederalTax} unit="%" />
+                      <InputField label="State Tax" value={stateTax} onChange={setStateTax} unit="%" />
+                      <OutputRow label="Combined" value={`${calcs.combinedTaxRate.toFixed(1)}%`} />
+                    </Section>
+                    <Section title="Incentives">
+                      <div className="flex items-center justify-between py-1">
+                        <label className="text-gray-700 text-xs">ITC</label>
+                        <input type="checkbox" checked={itcEnabled} onChange={(e) => setItcEnabled(e.target.checked)} className="rounded" />
+                      </div>
+                      {itcEnabled && <><InputField label="ITC Rate" value={itcRate} onChange={setItcRate} unit="%" /><InputField label="Eligible %" value={itcEligiblePct} onChange={setItcEligiblePct} unit="%" /><OutputRow label="ITC Value" value={formatCurrency(calcs.itcValue)} highlight /></>}
+                      <div className="flex items-center justify-between py-1">
+                        <label className="text-gray-700 text-xs">45X Extraction</label>
+                        <input type="checkbox" checked={ptcEnabled} onChange={(e) => setPtcEnabled(e.target.checked)} className="rounded" />
+                      </div>
+                      {ptcEnabled && <><InputField label="Rate" value={ptcRate} onChange={setPtcRate} unit="%" /><OutputRow label="Credit" value={formatCurrency(calcs.ptcBenefit)} /></>}
+                      <div className="flex items-center justify-between py-1">
+                        <label className="text-gray-700 text-xs">45X Processing</label>
+                        <input type="checkbox" checked={processingCreditEnabled} onChange={(e) => setProcessingCreditEnabled(e.target.checked)} className="rounded" />
+                      </div>
+                      {processingCreditEnabled && <><InputField label="$/t" value={processingCreditRate} onChange={setProcessingCreditRate} unit="$/t" step={100} /><OutputRow label="Credit" value={formatCurrency(calcs.processingCredit)} /></>}
+                      {(ptcEnabled || processingCreditEnabled) && <OutputRow label="Total 45X" value={formatCurrency(calcs.total45XBenefit)} unit="/yr" highlight />}
+                      <div className="flex items-center justify-between py-1">
+                        <label className="text-gray-700 text-xs">% Depletion</label>
+                        <input type="checkbox" checked={percentageDepletion} onChange={(e) => setPercentageDepletion(e.target.checked)} className="rounded" />
+                      </div>
+                      <InputField label="Grant" value={grantAmount} onChange={setGrantAmount} unit="$MM" />
+                      <div className="flex items-center justify-between py-1">
+                        <label className="text-gray-700 text-xs">DOE Loan</label>
+                        <input type="checkbox" checked={doeLoanGuarantee} onChange={(e) => setDoeLoanGuarantee(e.target.checked)} className="rounded" />
+                      </div>
+                      {doeLoanGuarantee && <InputField label="Rate" value={doeLoanRate} onChange={setDoeLoanRate} unit="%" step={0.25} />}
+                    </Section>
+                  </div>
+                  <div>
+                    <Section title="Brine & Wells">
+                      <OutputRow label="Daily Brine" value={calcs.dailyBrineVol.toLocaleString(undefined, {maximumFractionDigits: 0})} unit="bbl/d" />
+                      {devType === 'Greenfield' && <OutputRow label="Pump Power" value={(calcs.pumpKwhPerBbl || 0).toFixed(2)} unit="kWh/bbl" />}
+                      <OutputRow label="Prod Wells" value={calcs.numProdWells} />
+                      <OutputRow label="Inj Wells" value={calcs.numInjWells} />
+                      <OutputRow label="Total Wells" value={calcs.totalWells} highlight />
+                    </Section>
+                    <Section title="CAPEX">
+                      <OutputRow label="Wells" value={formatCurrency(calcs.wellCapex)} />
+                      <OutputRow label="Pipeline" value={formatCurrency(calcs.pipelineCapex)} />
+                      <OutputRow label="CPF" value={formatCurrency(calcs.cpfCapex)} />
+                      <OutputRow label="License" value={formatCurrency(calcs.dleLicense)} />
+                      <OutputRow label="Contingency" value={formatCurrency(calcs.contingencyAmt)} />
+                      <OutputRow label="EPCM" value={formatCurrency(calcs.epcmAmt)} />
+                      <OutputRow label="Gross CAPEX" value={formatCurrency(calcs.grossCapex)} />
+                      {grantAmount > 0 && <OutputRow label="Less: Grant" value={`(${formatCurrency(grantAmount)})`} />}
+                      <OutputRow label="Net CAPEX" value={formatCurrency(calcs.totalCapex)} highlight />
+                    </Section>
+                    <Section title="OPEX">
+                      <OutputRow label="Variable" value={formatCurrency(calcs.variableOpex)} unit="/yr" />
+                      <OutputRow label="Fixed" value={formatCurrency(calcs.fixedOpex)} unit="/yr" />
+                      <OutputRow label="Total" value={formatCurrency(calcs.totalOpex)} unit="/yr" />
+                      {ptcEnabled && <OutputRow label="Less: PTC" value={`(${formatCurrency(calcs.ptcBenefit)})`} />}
+                      <OutputRow label="Net OPEX" value={formatCurrency(calcs.effectiveOpex)} unit="/yr" highlight />
+                      <OutputRow label="OPEX/t" value={`$${calcs.opexPerTonne.toFixed(0)}/t`} />
+                    </Section>
+                    <Section title="Returns">
+                      <OutputRow label="Revenue" value={formatCurrency(calcs.annualRevenue)} unit="/yr" />
+                      <OutputRow label="EBITDA" value={formatCurrency(calcs.ebitda)} unit="/yr" />
+                      <OutputRow label="NPV" value={formatCurrency(calcs.npv)} highlight />
+                      <OutputRow label="LCOL" value={`$${calcs.lcol.toLocaleString(undefined, {maximumFractionDigits: 0})}/t`} highlight />
+                      <OutputRow label="Margin" value={`$${calcs.margin.toLocaleString(undefined, {maximumFractionDigits: 0})}/t`} />
+                    </Section>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activeTab === 'simulation' && (
+              <div className="bg-white rounded-b-lg shadow p-4">
+                <h2 className="text-lg font-semibold text-gray-800 mb-4">Monte Carlo Simulation</h2>
+                <div className="grid grid-cols-3 gap-6">
+                  <div className="col-span-2">
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Uncertain Parameters</h3>
+                    <div className="grid grid-cols-2 gap-4">
+                      {Object.entries(mcParams).map(([key, config]) => (
+                        <div key={key} className="flex items-center justify-between p-2 bg-gray-50 rounded">
+                          <div className="flex items-center gap-2">
+                            <input type="checkbox" checked={config.enabled} onChange={(e) => setMcParams(prev => ({...prev, [key]: {...prev[key], enabled: e.target.checked}}))} className="rounded" />
+                            <span className="text-xs text-gray-700 capitalize">{key.replace(/([A-Z])/g, ' $1')}</span>
+                          </div>
+                          <div className="flex items-center gap-2">
+                            <select value={config.dist} onChange={(e) => setMcParams(prev => ({...prev, [key]: {...prev[key], dist: e.target.value}}))} className="text-xs border rounded p-1" disabled={!config.enabled}>
+                              <option value="triangular">Triangular</option>
+                              <option value="uniform">Uniform</option>
+                            </select>
+                            <input type="number" value={config.spread} onChange={(e) => setMcParams(prev => ({...prev, [key]: {...prev[key], spread: parseFloat(e.target.value) || 0}}))} className="w-16 text-xs border rounded p-1 text-right" disabled={!config.enabled} />
+                            <span className="text-xs text-gray-500">%</span>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Settings</h3>
+                    <div className="space-y-4">
+                      <div>
+                        <label className="text-xs text-gray-600">Iterations</label>
+                        <input type="number" value={mcIterations} onChange={(e) => setMcIterations(parseInt(e.target.value) || 1000)} className="w-full mt-1 text-sm border rounded p-2" step={500} min={100} max={10000} />
+                      </div>
+                      <div>
+                        <label className="text-xs text-gray-600">Output Metric</label>
+                        <select value={mcOutputMetric} onChange={(e) => setMcOutputMetric(e.target.value)} className="w-full mt-1 text-sm border rounded p-2">
+                          <option value="lcol">LCOL ($/t)</option>
+                          <option value="npv">NPV ($MM)</option>
+                        </select>
+                      </div>
+                      <button onClick={runMonteCarlo} disabled={mcRunning} className="w-full py-3 bg-green-600 text-white rounded-lg font-medium hover:bg-green-700 disabled:bg-gray-400">{mcRunning ? 'Running...' : 'Run Simulation'}</button>
+                    </div>
+                    {mcResults && (
+                      <div className="mt-6 p-4 bg-green-50 rounded-lg">
+                        <h4 className="text-sm font-semibold text-gray-700 mb-3">Results ({mcResults.metric === 'npv' ? 'NPV $MM' : 'LCOL $/t'})</h4>
+                        <div className="space-y-2 text-sm">
+                          <div className="flex justify-between"><span>P10:</span><span className="font-mono">{mcResults.p10.toFixed(mcResults.metric === 'npv' ? 1 : 0)}</span></div>
+                          <div className="flex justify-between"><span>P50:</span><span className="font-mono font-bold">{mcResults.p50.toFixed(mcResults.metric === 'npv' ? 1 : 0)}</span></div>
+                          <div className="flex justify-between"><span>P90:</span><span className="font-mono">{mcResults.p90.toFixed(mcResults.metric === 'npv' ? 1 : 0)}</span></div>
+                          <div className="flex justify-between border-t pt-2"><span>Mean:</span><span className="font-mono">{mcResults.mean.toFixed(mcResults.metric === 'npv' ? 1 : 0)}</span></div>
+                          <div className="flex justify-between"><span>Std Dev:</span><span className="font-mono">{mcResults.stdDev.toFixed(mcResults.metric === 'npv' ? 1 : 0)}</span></div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                </div>
+                {mcResults && mcResults.histogramData && (
+                  <div className="mt-6">
+                    <h3 className="text-sm font-semibold text-gray-700 mb-3">Distribution</h3>
+                    <Histogram data={mcResults.histogramData} />
+                  </div>
+                )}
+              </div>
+            )}
+
+            {activeTab === 'charts' && (
+              <div className="bg-white rounded-b-lg shadow p-4">
+                <div className="grid grid-cols-2 gap-6">
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-semibold text-gray-700 mb-4">CAPEX Breakdown</h3>
+                    <SimplePieChart data={capexData} />
+                    <div className="text-center mt-4 text-lg font-bold text-gray-700">Total: {formatCurrency(calcs.grossCapex)}</div>
+                  </div>
+                  <div className="bg-gray-50 rounded-lg p-4">
+                    <h3 className="text-sm font-semibold text-gray-700 mb-4">OPEX Breakdown ($MM/yr)</h3>
+                    <SimpleBarChart data={opexData} horizontal formatValue={(v) => v.toFixed(2)} />
+                    <div className="text-center mt-4 text-lg font-bold text-gray-700">Total: {formatCurrency(calcs.totalOpex)}/yr</div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            <div className="mt-4 text-center text-xs text-gray-500">DLE Economic Model v5 • Screening-level estimates only</div>
+          </div>
+        </div>
+      );
+    };
+
+    ReactDOM.render(<DLEModel />, document.getElementById('root'));
+  </script>
+</body>
+</html>
